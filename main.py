@@ -31,7 +31,11 @@ from phoneme_converter import text_to_phonemes
 app = FastAPI()
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # For development only
+    allow_origins=[
+    "https://omverse.github.io",
+    "http://localhost:3000",
+    "http://127.0.0.1:3000",
+],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],

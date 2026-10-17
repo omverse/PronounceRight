@@ -14,7 +14,7 @@ from pydantic import BaseModel
 import httpx
 
 load_dotenv()
-
+GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_KEY = os.getenv("SUPABASE_KEY")
 
@@ -77,9 +77,9 @@ async def transcribe_audio_cloud(
     Transcribes audio using Groq's cloud Whisper API.
     Falls back to local model if API key is missing or call fails.
     """
-    api_key = os.getenv("GROQ_API_KEY") or os.getenv("GEMINI_API_KEY")
+    api_key = os.getenv("GROQ_API_KEY") 
     if not api_key:
-        print("No GROQ_API_KEY or GEMINI_API_KEY found. Falling back to local Whisper model.")
+        print("No GROQ_API_KEY found. Falling back to local Whisper model.")
         return transcribe_audio_local(file_path, language, prompt, is_challenge)
     
     url = "https://api.groq.com/openai/v1/audio/transcriptions"
@@ -357,10 +357,8 @@ def calculate_accuracy_py(expected, predicted, language):
         score_phoneme = 0.0
     return max(0.0, float(accuracy_norm), float(accuracy_phonetic), float(score_phoneme))
 
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "AQ.Ab8RN6L5241gckMicIfyc3L7g17jQotoa0mOBIwQxRuxzhVMXg")
-
 async def get_groq_coaching_feedback(expected_text: str, transcript: str, accuracy: float, wpm: int, fluency: float) -> str:
-    groq_api_key = os.getenv("GROQ_API_KEY") or os.getenv("GEMINI_API_KEY")
+    groq_api_key = os.getenv("GROQ_API_KEY")
     if not groq_api_key:
         return "Excellent attempt! Continue practicing to increase your pacing and accuracy."
         
@@ -805,7 +803,7 @@ class ChatRequest(BaseModel):
 
 @app.post("/vocalcoach_chat")
 async def vocalcoach_chat(request: ChatRequest):
-    groq_api_key = os.getenv("GROQ_API_KEY") or os.getenv("GEMINI_API_KEY")
+    groq_api_key = os.getenv("GROQ_API_KEY")
     if not groq_api_key:
         return JSONResponse(
             status_code=500,

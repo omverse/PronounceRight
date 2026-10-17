@@ -1,0 +1,19 @@
+# Secrets
+.env
+*.env
+.env.*
+!.env.example
+
+# Python
+__pycache__/
+*.py[cod]
+venv/
+.venv/
+
+# Audio scratch
+*.wav
+*.mp3
+
+# OS files
+.DS_Store
+Thumbs.db

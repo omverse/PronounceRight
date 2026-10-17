@@ -130,9 +130,11 @@ async def transcribe_audio_cloud(
                 info = CloudTranscriptionInfo(duration=duration, language=detected_lang)
                 return segments, info
             else:
-                print(f"Groq API returned error {response.status_code}: {response.text}. Falling back to local model.")
+                print(f"\n[CRITICAL WARNING] Groq Whisper API call failed with status {response.status_code}: {response.text}")
+                print("[FALLBACK] Switching to local Whisper model (Warning: high memory usage on Render free tier).\n")
     except Exception as e:
-        print(f"Exception occurred during Groq cloud transcription: {e}. Falling back to local model.")
+        print(f"\n[CRITICAL WARNING] Exception during Groq cloud transcription: {e}")
+        print("[FALLBACK] Switching to local Whisper model (Warning: high memory usage on Render free tier).\n")
         
     return transcribe_audio_local(file_path, language, prompt, is_challenge)
 
@@ -387,11 +389,13 @@ async def get_groq_coaching_feedback(expected_text: str, transcript: str, accura
     )
     
     payload = {
-        "model": "llama-3.3-70b-versatile",
+        "model": "openai/gpt-oss-120b",
         "messages": [
             {"role": "system", "content": system_instruction},
             {"role": "user", "content": user_prompt}
-        ]
+        ],
+        "max_completion_tokens": 800,
+        "reasoning_effort": "low",
     }
     
     try:
@@ -829,11 +833,13 @@ async def vocalcoach_chat(request: ChatRequest):
     )
     
     payload = {
-        "model": "llama-3.3-70b-versatile",
+        "model": "openai/gpt-oss-120b",
         "messages": [
             {"role": "system", "content": system_instruction},
             {"role": "user", "content": request.prompt}
-        ]
+        ],
+        "max_completion_tokens": 1000,
+        "reasoning_effort": "low",
     }
     
     try:
@@ -855,7 +861,3 @@ async def vocalcoach_chat(request: ChatRequest):
     except Exception as e:
         print(f"Chat error: {e}")
         return JSONResponse(status_code=500, content={"message": f"Server encountered error: {str(e)}"})
-
-
-
-

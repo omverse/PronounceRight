@@ -4,7 +4,7 @@ from dotenv import load_dotenv
 import os
 from supabase import create_client, Client
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi import FastAPI, Request, UploadFile, File, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, Request, UploadFile, File, WebSocket, WebSocketDisconnect, HTTPException
 from fastapi.responses import JSONResponse
 from slowapi import Limiter, _rate_limit_exceeded_handler
 from slowapi.util import get_remote_address
@@ -153,6 +153,14 @@ def transcribe_audio_local(
     """
     Transcribes audio using local Whisper model.
     """
+    try:
+        from faster_whisper import WhisperModel  # noqa: F401
+    except ImportError:
+        raise HTTPException(
+            status_code=503,
+            detail="Speech service temporarily unavailable. Please try again."
+        )
+
     if is_challenge:
         local_model = get_local_challenge_model()
         lang_code = language.split("-")[0] if language else None

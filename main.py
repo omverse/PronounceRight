@@ -4,8 +4,11 @@ from dotenv import load_dotenv
 import os
 from supabase import create_client, Client
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi import FastAPI, UploadFile, File, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, Request, UploadFile, File, WebSocket, WebSocketDisconnect
 from fastapi.responses import JSONResponse
+from slowapi import Limiter, _rate_limit_exceeded_handler
+from slowapi.util import get_remote_address
+from slowapi.errors import RateLimitExceeded
 import shutil
 import tempfile
 import asyncio
@@ -28,7 +31,10 @@ supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 from scoring import pronunciation_score
 from phoneme_converter import text_to_phonemes
 
+limiter = Limiter(key_func=get_remote_address)
 app = FastAPI()
+app.state.limiter = limiter
+app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
@@ -181,7 +187,9 @@ def root():
     return {"message": "PronounceRight AI backend is running"}
 
 @app.post("/analyze_challenge")
+@limiter.limit("20/minute")
 async def analyze_audio_challenge(
+    request: Request,
     expected_text: str,
     language: str,
     file: UploadFile = File(...)
@@ -214,7 +222,9 @@ async def analyze_audio_challenge(
     }
 
 @app.post("/analyze")
+@limiter.limit("20/minute")
 async def analyze_audio(
+    request: Request,
     expected_text: str,
     language: str,
     file: UploadFile = File(...)
@@ -413,7 +423,9 @@ async def get_groq_coaching_feedback(expected_text: str, transcript: str, accura
         return "Excellent attempt! Continue practicing to increase your pacing and accuracy."
 
 @app.post("/custom_speech_analyze")
+@limiter.limit("20/minute")
 async def custom_speech_analyze(
+    request: Request,
     expected_text: str,
     language: str,
     file: UploadFile = File(...)
@@ -810,7 +822,8 @@ class ChatRequest(BaseModel):
 
 
 @app.post("/vocalcoach_chat")
-async def vocalcoach_chat(request: ChatRequest):
+@limiter.limit("15/minute")
+async def vocalcoach_chat(request: Request, body: ChatRequest):
     groq_api_key = os.getenv("GROQ_API_KEY")
     if not groq_api_key:
         return JSONResponse(
@@ -836,7 +849,7 @@ async def vocalcoach_chat(request: ChatRequest):
         "model": "openai/gpt-oss-120b",
         "messages": [
             {"role": "system", "content": system_instruction},
-            {"role": "user", "content": request.prompt}
+            {"role": "user", "content": body.prompt}
         ],
         "max_completion_tokens": 1000,
         "reasoning_effort": "low",

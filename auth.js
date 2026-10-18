@@ -1,25 +1,20 @@
 import { supabase } from "./supabase.js"
 
 export async function signUp(email, password, username) {
+  const cleanUsername = username?.trim();
   const { data, error } = await supabase.auth.signUp({
     email,
     password,
+    options: {
+      data: {
+        username: cleanUsername || undefined
+      }
+    }
   })
 
   if (error) {
     alert(error.message)
     return
-  }
-
-  // Create profile row
-  if (data.user) {
-    await supabase.from("profiles").insert({
-      id: data.user.id,
-      username: username,
-      xp: 0,
-      level: 1,
-      streak: 0,
-    })
   }
 
   alert("Signup successful! Please check your email.")

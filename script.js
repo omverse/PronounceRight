@@ -90,7 +90,7 @@ function updateNavbarUI(user) {
       .from("profiles")
       .select("username")
       .eq("id", user.id)
-      .single()
+      .maybeSingle()
       .then(({ data, error }) => {
         if (data && data.username) {
           username = data.username;
@@ -104,9 +104,9 @@ function updateNavbarUI(user) {
             lobbyInput.dispatchEvent(new Event("change"));
             lobbyInput.dispatchEvent(new Event("blur"));
           }
-        } else {
+        } else if (!error) {
           // Profile doesn't exist (e.g. first-time login via Google OAuth). Create it!
-          const defaultUsername = user.email.split("@")[0] + "_" + Math.floor(100 + Math.random() * 900);
+          const defaultUsername = "learner_" + Math.floor(10000 + Math.random() * 90000);
           supabase
             .from("profiles")
             .insert({
@@ -116,7 +116,11 @@ function updateNavbarUI(user) {
               level: 1,
               streak: 0
             })
-            .then(() => {
+            .then(({ error: insertErr }) => {
+              if (insertErr) {
+                console.error("Failed to insert default profile for OAuth", insertErr);
+                return;
+              }
               username = defaultUsername;
               avatar.textContent = username.charAt(0).toUpperCase();
               profileName.textContent = username;

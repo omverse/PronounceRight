@@ -7,6 +7,26 @@ import { signUp, login, logout } from "./auth.js"
 // ===== SESSION SYSTEM =====
 window.currentUser = null;
 
+// ===== GUEST MODE =====
+const GUEST_KEY = "pr_guest";
+window.isGuest = () => {
+  try { return sessionStorage.getItem(GUEST_KEY) === "1"; } catch { return false; }
+};
+function setGuest(on) {
+  try { on ? sessionStorage.setItem(GUEST_KEY, "1") : sessionStorage.removeItem(GUEST_KEY); } catch {}
+}
+window.canUseApp = () => !!window.currentUser || window.isGuest();
+
+function applyGuestIdentity() {
+  if (window.currentUser || !window.isGuest()) return;
+  const lobbyInput = document.getElementById("usernameInput");
+  if (lobbyInput && !lobbyInput.value.trim()) {
+    lobbyInput.value = "Guest_" + Math.floor(1000 + Math.random() * 9000);
+    lobbyInput.dispatchEvent(new Event("change"));
+    lobbyInput.dispatchEvent(new Event("blur"));
+  }
+}
+
 async function checkUserSession() {
   const { data: { session } } = await supabase.auth.getSession();
   const user = session?.user || null;
@@ -27,34 +47,29 @@ async function checkUserSession() {
 function enforceAuth(user) {
   const modal = document.getElementById("authModal");
   if (!modal) return;
-
   const closeBtn = document.getElementById("closeAuthModal");
 
-  if (!user) {
-    // Show modal automatically on any page if logged out
-    modal.classList.add("active");
-    document.body.style.overflow = "hidden";
-    
-    // Hide close button to make login mandatory
-    if (closeBtn) {
-      closeBtn.style.display = "none";
-    }
-  } else {
-    // User is logged in, close modal
+  if (user) {
+    setGuest(false);
     modal.classList.remove("active");
     document.body.style.overflow = "";
-    
-    // Restore close button display just in case
-    if (closeBtn) {
-      closeBtn.style.display = "block";
-    }
+    if (closeBtn) closeBtn.style.display = "block";
+  } else if (window.isGuest()) {
+    modal.classList.remove("active");
+    document.body.style.overflow = "";
+    if (closeBtn) closeBtn.style.display = "block";
+    applyGuestIdentity();
+  } else {
+    modal.classList.add("active");
+    document.body.style.overflow = "hidden";
+    if (closeBtn) closeBtn.style.display = "none";
   }
 }
 
 async function protectPage() {
   const { data: { session } } = await supabase.auth.getSession();
 
-  if (!session) {
+  if (!session && !window.isGuest()) {
     // Not logged in → redirect to home
     window.location.href = "index.html";
   }
@@ -1054,9 +1069,28 @@ function setupAuthModal() {
     });
   }
 
+  // ===== GUEST BUTTON =====
+  if (authCard && !document.getElementById("guestBtn")) {
+    const guestBtn = document.createElement("button");
+    guestBtn.id = "guestBtn";
+    guestBtn.type = "button";
+    guestBtn.className = "btn-google-auth btn-guest-auth";
+    guestBtn.textContent = "Continue as guest";
+    const anchor = document.getElementById("googleAuthBtn") || submitBtn;
+    anchor.parentNode.insertBefore(guestBtn, anchor.nextSibling);
+
+    guestBtn.addEventListener("click", () => {
+      setGuest(true);
+      modal.classList.remove("active");
+      document.body.style.overflow = "";
+      if (closeBtn) closeBtn.style.display = "block";
+      applyGuestIdentity();
+    });
+  }
+
   // ===== BACKDROP CLICK CLOSING =====
   modal.addEventListener("click", (e) => {
-    if (e.target === modal && window.currentUser) {
+    if (e.target === modal && window.canUseApp()) {
       modal.classList.remove("active");
       document.body.style.overflow = "";
     }
@@ -1093,7 +1127,7 @@ function setupAuthModal() {
   // ===== CLOSE BUTTON =====
   if (closeBtn) {
     closeBtn.addEventListener("click", () => {
-      if (window.currentUser) {
+      if (window.canUseApp()) {
         modal.classList.remove("active");
         document.body.style.overflow = "";
       }

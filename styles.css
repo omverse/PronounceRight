@@ -5349,3 +5349,7 @@ input:checked + .slider-toggle:before {
   width: 18px;
   height: 18px;
 }
+
+.btn-guest-auth {
+  margin-top: 10px;
+}

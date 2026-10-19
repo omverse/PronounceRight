@@ -4,7 +4,7 @@ from dotenv import load_dotenv
 import os
 from supabase import create_client, Client
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi import FastAPI, Request, UploadFile, File, WebSocket, WebSocketDisconnect, HTTPException
+from fastapi import FastAPI, Request, UploadFile, File, WebSocket, WebSocketDisconnect, HTTPException, Query
 from fastapi.responses import JSONResponse
 from slowapi import Limiter, _rate_limit_exceeded_handler
 from slowapi.util import get_remote_address
@@ -13,7 +13,7 @@ import shutil
 import tempfile
 import asyncio
 from typing import Dict, Optional
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 import httpx
 
 load_dotenv()
@@ -190,6 +190,24 @@ LANGUAGE_PROMPTS = {
     "pa": "A pronunciation practice for Indian names and terms in Punjabi.",
 }
 
+MAX_AUDIO_BYTES = 10 * 1024 * 1024  # 10 MB, tune after testing your longest recording
+
+def save_upload_to_temp(file: UploadFile) -> str:
+    total = 0
+    too_big = False
+    with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as temp_file:
+        name = temp_file.name
+        while chunk := file.file.read(1024 * 1024):
+            total += len(chunk)
+            if total > MAX_AUDIO_BYTES:
+                too_big = True
+                break
+            temp_file.write(chunk)
+    if too_big:
+        os.remove(name)
+        raise HTTPException(status_code=413, detail="Audio file too large (max 10 MB)")
+    return name
+
 @app.get("/")
 def root():
     return {"message": "PronounceRight AI backend is running"}
@@ -198,91 +216,87 @@ def root():
 @limiter.limit("20/minute")
 async def analyze_audio_challenge(
     request: Request,
-    expected_text: str,
-    language: str,
+    expected_text: str = Query(..., min_length=1, max_length=1000),
+    language: str = Query(..., max_length=10),
     file: UploadFile = File(...)
 ):
-    # Create temporary file in the OS temp directory
-    with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as temp_file:
-        shutil.copyfileobj(file.file, temp_file)
-        temp_filename = temp_file.name
+    temp_filename = save_upload_to_temp(file)
+    try:
+        segments, info = await transcribe_audio_cloud(
+            temp_filename,
+            language=language,
+            is_challenge=True
+        )
 
-    segments, info = await transcribe_audio_cloud(
-        temp_filename,
-        language=language,
-        is_challenge=True
-    )
+        predicted_text = ""
+        for segment in segments:
+            predicted_text += segment.text + " "
 
-    predicted_text = ""
-    for segment in segments:
-        predicted_text += segment.text + " "
+        predicted_text = predicted_text.strip()
+        predicted_text = predicted_text[:2000]
 
-    predicted_text = predicted_text.strip()
+        # Only compute accuracy (no phonemes)
+        score = pronunciation_score(expected_text, predicted_text, language)
 
-    # Only compute accuracy (no phonemes)
-    score = pronunciation_score(expected_text, predicted_text, language)
-
-    os.remove(temp_filename)
-
-    return {
-        "accuracy": score,
-        "transcript": predicted_text
-    }
+        return {
+            "accuracy": score,
+            "transcript": predicted_text
+        }
+    finally:
+        if os.path.exists(temp_filename):
+            os.remove(temp_filename)
 
 @app.post("/analyze")
 @limiter.limit("20/minute")
 async def analyze_audio(
     request: Request,
-    expected_text: str,
-    language: str,
+    expected_text: str = Query(..., min_length=1, max_length=1000),
+    language: str = Query(..., max_length=10),
     file: UploadFile = File(...)
 ):
-    # Create temporary file in the OS temp directory
-    with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as temp_file:
-        shutil.copyfileobj(file.file, temp_file)
-        temp_filename = temp_file.name
+    temp_filename = save_upload_to_temp(file)
+    try:
+        # Transcribe audio
+        lang_code = language.split("-")[0]
+        prompt = LANGUAGE_PROMPTS.get(lang_code, "A pronunciation practice session for Indian accents.")
+        segments, info = await transcribe_audio_cloud(
+            temp_filename,
+            language=language,
+            prompt=prompt,
+            is_challenge=False
+        )
 
-    # Transcribe audio
-    lang_code = language.split("-")[0]
-    prompt = LANGUAGE_PROMPTS.get(lang_code, "A pronunciation practice session for Indian accents.")
-    segments, info = await transcribe_audio_cloud(
-        temp_filename,
-        language=language,
-        prompt=prompt,
-        is_challenge=False
-    )
+        predicted_text = ""
+        for segment in segments:
+            predicted_text += segment.text + " "
 
+        predicted_text = predicted_text.strip()
+        predicted_text = predicted_text[:2000]
 
-    predicted_text = ""
-    for segment in segments:
-        predicted_text += segment.text + " "
+        # Phoneme conversion
+        expected_phonemes = text_to_phonemes(expected_text, language)
+        predicted_phonemes = text_to_phonemes(predicted_text, language)
 
-    predicted_text = predicted_text.strip()
+        # Score
+        score = pronunciation_score(expected_text, predicted_text, language)
 
-    # Phoneme conversion
-    expected_phonemes = text_to_phonemes(expected_text, language)
-    predicted_phonemes = text_to_phonemes(predicted_text, language)
+        # Calculate Words Per Minute (WPM) dynamically
+        word_count = len(predicted_text.split())
+        duration_minutes = info.duration / 60.0 if info.duration else 0.0
+        wpm = round(word_count / duration_minutes) if duration_minutes > 0 else 0
 
-    # Score
-    score = pronunciation_score(expected_text, predicted_text, language)
-
-    # Calculate Words Per Minute (WPM) dynamically
-    word_count = len(predicted_text.split())
-    duration_minutes = info.duration / 60.0 if info.duration else 0.0
-    wpm = round(word_count / duration_minutes) if duration_minutes > 0 else 0
-
-    # Remove temp file
-    os.remove(temp_filename)
-
-    return JSONResponse({
-        "expected_text": expected_text,
-        "transcript": predicted_text,   # frontend expects this
-        "accuracy": score,              # frontend expects this
-        "wpm": wpm,                     # dynamically computed WPM
-        "expected_phonemes": expected_phonemes,
-        "predicted_phonemes": predicted_phonemes,
-        "detected_language": info.language
-    })
+        return JSONResponse({
+            "expected_text": expected_text,
+            "transcript": predicted_text,   # frontend expects this
+            "accuracy": score,              # frontend expects this
+            "wpm": wpm,                     # dynamically computed WPM
+            "expected_phonemes": expected_phonemes,
+            "predicted_phonemes": predicted_phonemes,
+            "detected_language": info.language
+        })
+    finally:
+        if os.path.exists(temp_filename):
+            os.remove(temp_filename)
 
 import re
 import httpx
@@ -434,56 +448,56 @@ async def get_groq_coaching_feedback(expected_text: str, transcript: str, accura
 @limiter.limit("20/minute")
 async def custom_speech_analyze(
     request: Request,
-    expected_text: str,
-    language: str,
+    expected_text: str = Query(..., min_length=1, max_length=1000),
+    language: str = Query(..., max_length=10),
     file: UploadFile = File(...)
 ):
-    with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as temp_file:
-        shutil.copyfileobj(file.file, temp_file)
-        temp_filename = temp_file.name
+    temp_filename = save_upload_to_temp(file)
+    try:
+        lang_code = language.split("-")[0]
+        prompt = LANGUAGE_PROMPTS.get(lang_code, "A pronunciation practice session for Indian accents.")
+        segments, info = await transcribe_audio_cloud(
+            temp_filename,
+            language=language,
+            prompt=prompt,
+            is_challenge=False
+        )
 
-    lang_code = language.split("-")[0]
-    prompt = LANGUAGE_PROMPTS.get(lang_code, "A pronunciation practice session for Indian accents.")
-    segments, info = await transcribe_audio_cloud(
-        temp_filename,
-        language=language,
-        prompt=prompt,
-        is_challenge=False
-    )
+        predicted_text = ""
+        for segment in segments:
+            predicted_text += segment.text + " "
+        predicted_text = predicted_text.strip()
+        predicted_text = predicted_text[:2000]
 
-    predicted_text = ""
-    for segment in segments:
-        predicted_text += segment.text + " "
-    predicted_text = predicted_text.strip()
+        accuracy = calculate_accuracy_py(expected_text, predicted_text, language)
 
-    accuracy = calculate_accuracy_py(expected_text, predicted_text, language)
+        word_count = len(predicted_text.split())
+        duration_minutes = info.duration / 60.0 if info.duration else 0.0
+        wpm = round(word_count / duration_minutes) if duration_minutes > 0 else 0
 
-    word_count = len(predicted_text.split())
-    duration_minutes = info.duration / 60.0 if info.duration else 0.0
-    wpm = round(word_count / duration_minutes) if duration_minutes > 0 else 0
-
-    if wpm == 0:
-        fluency = 0.0
-    else:
-        if 100 <= wpm <= 150:
-            pacing_score = 100.0
-        elif wpm < 100:
-            pacing_score = max(30.0, 100.0 - (100.0 - wpm) * 0.8)
+        if wpm == 0:
+            fluency = 0.0
         else:
-            pacing_score = max(30.0, 100.0 - (wpm - 150.0) * 0.8)
-        fluency = round((accuracy * 0.6) + (pacing_score * 0.4), 2)
+            if 100 <= wpm <= 150:
+                pacing_score = 100.0
+            elif wpm < 100:
+                pacing_score = max(30.0, 100.0 - (100.0 - wpm) * 0.8)
+            else:
+                pacing_score = max(30.0, 100.0 - (wpm - 150.0) * 0.8)
+            fluency = round((accuracy * 0.6) + (pacing_score * 0.4), 2)
 
-    os.remove(temp_filename)
+        feedback = await get_groq_coaching_feedback(expected_text, predicted_text, accuracy, wpm, fluency)
 
-    feedback = await get_groq_coaching_feedback(expected_text, predicted_text, accuracy, wpm, fluency)
-
-    return JSONResponse({
-        "transcript": predicted_text,
-        "accuracy": accuracy,
-        "fluency": fluency,
-        "wpm": wpm,
-        "feedback": feedback
-    })
+        return JSONResponse({
+            "transcript": predicted_text,
+            "accuracy": accuracy,
+            "fluency": fluency,
+            "wpm": wpm,
+            "feedback": feedback
+        })
+    finally:
+        if os.path.exists(temp_filename):
+            os.remove(temp_filename)
 
 @app.get("/categories")
 def get_categories(language: str):
@@ -507,7 +521,7 @@ def get_content(
     mode: str = "word",
     difficulty: str = "easy",
     language: str = "en",
-    limit: int = 1
+    limit: int = Query(1, ge=1, le=50)
 ):
     query = (
         supabase.table("content_library")
@@ -631,14 +645,21 @@ def fetch_random_battle_paragraph(language: str = "en") -> str:
 async def websocket_battle(websocket: WebSocket, lobby_id: str, player_name: str, duration: Optional[int] = 60):
     await websocket.accept()
     
-    lobby_id = lobby_id.strip().upper()
-    player_name = player_name.strip()
+    lobby_id = lobby_id.strip().upper()[:12]
+    player_name = player_name.strip()[:20]
     
-    # Grab a random paragraph if this is a new room
-    target_paragraph = fetch_random_battle_paragraph("en")
+    # Grab a random paragraph only if this is a new room (capped to 100 lobbies)
+    if lobby_id not in lobby_manager.lobbies:
+        if len(lobby_manager.lobbies) >= 100:
+            await websocket.send_json({"type": "error", "message": "Server busy, try again soon"})
+            await websocket.close()
+            return
+        target_paragraph = fetch_random_battle_paragraph("en")
+    else:
+        target_paragraph = ""
     
     # Check if there is a custom duration from query parameters
-    lobby_duration = duration if duration is not None else 60
+    lobby_duration = max(10, min(duration or 60, 300))
     
     lobby = lobby_manager.get_or_create_lobby(lobby_id, target_paragraph, lobby_duration)
     
@@ -807,6 +828,8 @@ async def websocket_battle(websocket: WebSocket, lobby_id: str, player_name: str
     except Exception as e:
         print(f"WebSocket error: {e}")
         lobby.players.pop(player_name, None)
+        if not lobby.players:
+            lobby_manager.remove_lobby(lobby_id)
 
 
 @app.get("/battle_history")
@@ -822,11 +845,12 @@ def get_battle_history(player_name: str):
         )
         return {"history": response.data or []}
     except Exception as e:
-        return JSONResponse(status_code=500, content={"message": f"Error fetching history: {str(e)}"})
+        print(f"Error fetching battle history: {e}")
+        return JSONResponse(status_code=500, content={"message": "Error fetching battle history. Please try again later."})
 
 
 class ChatRequest(BaseModel):
-    prompt: str
+    prompt: str = Field(min_length=1, max_length=500)
 
 
 @app.post("/vocalcoach_chat")
@@ -881,4 +905,4 @@ async def vocalcoach_chat(request: Request, body: ChatRequest):
             
     except Exception as e:
         print(f"Chat error: {e}")
-        return JSONResponse(status_code=500, content={"message": f"Server encountered error: {str(e)}"})
+        return JSONResponse(status_code=500, content={"message": "An error occurred while communicating with the assistant. Please try again later."})

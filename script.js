@@ -80,7 +80,7 @@ function updateNavbarUI(user) {
     // Show Avatar
     avatar.style.display = "flex";
 
-    let username = user.email.split("@")[0];
+    let username = user.user_metadata?.username || "Learner";
     avatar.textContent = username.charAt(0).toUpperCase();
     profileName.textContent = username;
     profileEmail.textContent = user.email;
@@ -138,13 +138,7 @@ function updateNavbarUI(user) {
       })
       .catch(err => console.error("Failed to fetch username profile", err));
 
-    // Auto-populate lobby username input on battle.html initially
-    const lobbyInput = document.getElementById("usernameInput");
-    if (lobbyInput && !lobbyInput.value.trim()) {
-      lobbyInput.value = username;
-      lobbyInput.dispatchEvent(new Event("change"));
-      lobbyInput.dispatchEvent(new Event("blur"));
-    }
+
 
     // Toggle dropdown
     avatar.onclick = (e) => {
@@ -1683,7 +1677,7 @@ function initFloatingChatbot() {
       </div>
     </div>
     <div class="vocalcoach-input-area">
-      <input type="text" class="vocalcoach-input" id="vocalcoach-input" placeholder="Ask about pronunciation, meaning..." autocomplete="off">
+      <input type="text" class="vocalcoach-input" id="vocalcoach-input" placeholder="Ask about pronunciation, meaning..." autocomplete="off" maxlength="500">
       <button class="vocalcoach-send-btn" id="vocalcoach-send-btn" disabled aria-label="Send message">
         <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="2.5" stroke="currentColor">
           <path stroke-linecap="round" stroke-linejoin="round" d="M6 12L3.269 3.126A59.768 59.768 0 0121.485 12 59.77 59.77 0 013.27 20.876L5.999 12zm0 0h7.5" />
@@ -1899,7 +1893,7 @@ function setupSettingsModal() {
       if (accountSection) accountSection.style.display = "block";
       const uInput = document.getElementById("settingsUsername");
       const eInput = document.getElementById("settingsEmail");
-      if (uInput) uInput.value = user.email.split("@")[0];
+      if (uInput) uInput.value = user.user_metadata?.username || document.getElementById("profileName")?.textContent || "Learner";
       if (eInput) eInput.value = user.email;
     } else {
       if (accountSection) accountSection.style.display = "none";

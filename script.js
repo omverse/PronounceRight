@@ -1,6 +1,7 @@
 import { supabase } from "./supabase.js"
 
 console.log("Supabase connected:", supabase)
+window.supabaseClient = supabase;
 
 import { signUp, login, logout } from "./auth.js"
 

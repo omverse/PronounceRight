@@ -38,6 +38,18 @@
       .catch(err => console.warn("[Backend] Pre-warm failed", err));
   }
 
+  async function getAccessToken() {
+    try {
+      const client = window.supabaseClient;
+      if (!client?.auth?.getSession) return null;
+      const { data } = await client.auth.getSession();
+      return data?.session?.access_token || null;
+    } catch (e) {
+      console.warn("[auth] token lookup failed", e);
+      return null;
+    }
+  }
+
   async function wakeUpBackend() {
     const base_url = window.location.hostname === "localhost" || window.location.hostname === "127.0.0.1"
       ? "http://127.0.0.1:8000"
@@ -76,7 +88,11 @@
       const base_url = window.location.hostname === "localhost" || window.location.hostname === "127.0.0.1"
         ? "http://127.0.0.1:8000"
         : "https://pronounceright-1.onrender.com";
-      const response = await fetch(`${base_url}/battle_history?player_name=${encodeURIComponent(nickname)}`);
+      const token = await getAccessToken();
+      const response = await fetch(
+        `${base_url}/battle_history?player_name=${encodeURIComponent(nickname)}`,
+        { headers: token ? { Authorization: `Bearer ${token}` } : {} }
+      );
       if (!response.ok) throw new Error("API error");
       const data = await response.json();
       
@@ -162,7 +178,9 @@
     // Open connection
     socket = new WebSocket(wsUrl);
 
-    socket.onopen = () => {
+    socket.onopen = async () => {
+      const token = await getAccessToken();
+      socket.send(JSON.stringify({ type: "auth", token: token }));
       console.log("[WS] Connected to Battle Room:", lobbyId);
       
       // Update Setup view to Arena

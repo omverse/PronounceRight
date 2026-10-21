@@ -1,7 +1,7 @@
 import os
 os.environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"
 from dotenv import load_dotenv
-import os
+import re
 from supabase import create_client, Client
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi import FastAPI, Request, UploadFile, File, WebSocket, WebSocketDisconnect, HTTPException, Query
@@ -25,6 +25,34 @@ if not SUPABASE_URL or not SUPABASE_KEY:
     raise ValueError("Supabase credentials not loaded properly.")
 
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
+
+def _escape_like(value: str) -> str:
+    return value.replace("\\", "\\\\").replace("_", "\\_")
+
+async def get_verified_user(token: Optional[str]) -> Optional[dict]:
+    """Return {"id": ...} for a valid Supabase access token, else None."""
+    if not token:
+        return None
+    try:
+        res = await asyncio.to_thread(supabase.auth.get_user, token)
+        user = getattr(res, "user", None)
+        return {"id": str(user.id)} if user else None
+    except Exception as e:
+        print(f"Token verification failed: {e}")
+        return None
+
+async def is_name_reserved(name: str, owner_id: Optional[str]) -> bool:
+    """True if a registered account other than owner_id uses this nickname."""
+    try:
+        res = await asyncio.to_thread(
+            lambda: supabase.table("profiles").select("id")
+            .ilike("username", _escape_like(name)).limit(5).execute()
+        )
+        rows = res.data or []
+        return bool(rows) and not any(r["id"] == owner_id for r in rows)
+    except Exception as e:
+        print(f"Name reservation check failed: {e}")
+        return False  # fail open, so a Supabase hiccup doesn't block battles
 
 
 
@@ -298,9 +326,6 @@ async def analyze_audio(
         if os.path.exists(temp_filename):
             os.remove(temp_filename)
 
-import re
-import httpx
-
 def to_devanagari(char):
     code = ord(char)
     if 0x0900 <= code <= 0x0D7F:
@@ -521,7 +546,7 @@ def get_content(
     mode: str = "word",
     difficulty: str = "easy",
     language: str = "en",
-    limit: int = Query(1, ge=1, le=50)
+    limit: int = Query(1, ge=1, le=100)
 ):
     query = (
         supabase.table("content_library")
@@ -647,6 +672,31 @@ async def websocket_battle(websocket: WebSocket, lobby_id: str, player_name: str
     
     lobby_id = lobby_id.strip().upper()[:12]
     player_name = player_name.strip()[:20]
+    lobby_duration = max(10, min(duration or 60, 300))
+
+    if not re.fullmatch(r"[^\x00-\x1f\x7f<>&\"'`\\/%]{1,20}", player_name):
+        await websocket.send_json({"type": "error",
+            "message": "Nickname can't contain < > & quotes, slashes or %."})
+        await websocket.close()
+        return
+
+    # Identity handshake: the first frame must be {"type": "auth", "token": ...}
+    user_id = None
+    try:
+        first = await asyncio.wait_for(websocket.receive_json(), timeout=3)
+        if isinstance(first, dict) and first.get("type") == "auth":
+            verified = await get_verified_user(first.get("token"))
+            user_id = verified["id"] if verified else None
+    except WebSocketDisconnect:
+        return
+    except Exception:
+        pass  # no or invalid first frame: treated as a guest
+
+    if await is_name_reserved(player_name, user_id):
+        await websocket.send_json({"type": "error",
+            "message": "That nickname belongs to a registered account. Sign in as that user or pick another name."})
+        await websocket.close()
+        return
     
     # Grab a random paragraph only if this is a new room (capped to 100 lobbies)
     if lobby_id not in lobby_manager.lobbies:
@@ -658,10 +708,13 @@ async def websocket_battle(websocket: WebSocket, lobby_id: str, player_name: str
     else:
         target_paragraph = ""
     
-    # Check if there is a custom duration from query parameters
-    lobby_duration = max(10, min(duration or 60, 300))
-    
     lobby = lobby_manager.get_or_create_lobby(lobby_id, target_paragraph, lobby_duration)
+
+    existing = lobby.players.get(player_name)
+    if existing is not None and (user_id is None or existing.get("user_id") != user_id):
+        await websocket.send_json({"type": "error", "message": "That nickname is already taken in this room."})
+        await websocket.close()
+        return
     
     # Check if lobby is full
     if len(lobby.players) >= 2 and player_name not in lobby.players:
@@ -676,7 +729,8 @@ async def websocket_battle(websocket: WebSocket, lobby_id: str, player_name: str
         "progress": 0,
         "wpm": 0,
         "accuracy": 0.0,
-        "streak": 0
+        "streak": 0,
+        "user_id": user_id,
     }
     
     await lobby.broadcast({
@@ -790,7 +844,8 @@ async def websocket_battle(websocket: WebSocket, lobby_id: str, player_name: str
                                 "player_accuracy": p1["accuracy"],
                                 "opponent_accuracy": p2["accuracy"],
                                 "result": p1_res,
-                                "paragraph_text": lobby.target_text
+                                "paragraph_text": lobby.target_text,
+                                "user_id": p1.get("user_id"),
                             }).execute()
                             
                             # Player 2 (Opponent) record
@@ -803,7 +858,8 @@ async def websocket_battle(websocket: WebSocket, lobby_id: str, player_name: str
                                     "player_accuracy": p2["accuracy"],
                                     "opponent_accuracy": p1["accuracy"],
                                     "result": p2_res,
-                                    "paragraph_text": lobby.target_text
+                                    "paragraph_text": lobby.target_text,
+                                    "user_id": p2.get("user_id"),
                                 }).execute()
                         except Exception as e:
                             print("Error writing match scores to Supabase:", e)
@@ -833,16 +889,21 @@ async def websocket_battle(websocket: WebSocket, lobby_id: str, player_name: str
 
 
 @app.get("/battle_history")
-def get_battle_history(player_name: str):
+@limiter.limit("30/minute")
+async def get_battle_history(request: Request, player_name: str = Query("", max_length=40)):
+    auth = request.headers.get("authorization", "")
+    token = auth[7:].strip() if auth.lower().startswith("bearer ") else None
+    verified = await get_verified_user(token)
     try:
-        response = (
-            supabase.table("battle_history")
-            .select("*")
-            .eq("player_name", player_name)
-            .order("created_at", desc=True)
-            .limit(20)
-            .execute()
-        )
+        query = (supabase.table("battle_history").select("*")
+                 .order("created_at", desc=True).limit(20))
+        if verified:
+            query = query.eq("user_id", verified["id"])
+        elif re.fullmatch(r"Guest_\d{4}", player_name):
+            query = query.eq("player_name", player_name).is_("user_id", "null")
+        else:
+            return {"history": []}
+        response = await asyncio.to_thread(query.execute)
         return {"history": response.data or []}
     except Exception as e:
         print(f"Error fetching battle history: {e}")
